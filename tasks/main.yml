@@ -1,0 +1,117 @@
+---
+
+- name: Remove default root device from profile
+  become: yes
+  command: lxc profile device remove default root
+  ignore_errors: yes
+  # Error: The device doesn't exist
+
+- name: Remove default eth0 from profile
+  become: yes
+  command: lxc profile device remove default eth0
+  ignore_errors: yes
+  # Error: The device doesn't exist
+
+- name: Delete local storage
+  become: yes
+  command: lxc storage delete local
+  ignore_errors: yes
+  # Error: not found
+
+- name: Unset unset core.https_address config
+  become: yes
+  command: lxc config unset core.https_address
+  ignore_errors: yes
+
+- name: Create lxd-master.yaml
+  become: true
+  blockinfile:
+    path: lxd-master.yaml
+    block: |
+      config:
+        core.https_address: {{ hostvars[inventory_hostname]['ansible_' + lxd_interface].ipv4.address }}:8443
+        core.trust_password: {{ lxd_cluster_secret }}
+      networks: []
+      storage_pools:
+      - config:
+          size: 11GB
+        description: ""
+        name: local
+        driver: zfs
+      profiles:
+      - config: {}
+        description: ""
+        devices:
+          eth0:
+            name: eth0
+            nictype: bridged
+            parent: vlanbr0
+            type: nic
+          root:
+            path: /
+            pool: local
+            type: disk
+        name: default
+      cluster:
+        server_name: {{ inventory_hostname }}
+        enabled: true
+        member_config: []
+        cluster_address: ""
+        cluster_certificate: ""
+        server_address: ""
+        cluster_password: ""
+    state: present
+  when: inventory_hostname == groups['lxd'][0]
+
+- name: Create lxd-slave.yaml
+  become: true
+  blockinfile:
+    path: lxd-slave.yaml
+    block: |
+      config: {}
+      networks: []
+      storage_pools: []
+      profiles: []
+      cluster:
+        server_name: {{ inventory_hostname }}
+        enabled: true
+        member_config:
+        - entity: storage-pool
+          name: local
+          key: size
+          value: ""
+          description: '"size" property for storage pool "local"'
+        - entity: storage-pool
+          name: local
+          key: source
+          value: ""
+          description: '"source" property for storage pool "local"'
+        - entity: storage-pool
+          name: local
+          key: zfs.pool_name
+          value: ""
+          description: '"zfs.pool_name" property for storage pool "local"'
+        cluster_address: 192.168.2.3:8443
+        server_address: 192.168.2.4:8443
+        cluster_password: {{ lxd_cluster_secret }}
+    state: present
+  when: inventory_hostname != groups['lxd'][0]
+
+# https://discuss.linuxcontainers.org/t/lxd-cluster-on-raspberry-pi-4/9076
+- name: Running 'lxc init' on master
+  become: yes
+  command: cat lxd-master.yaml | lxc init --preseed
+  when: inventory_hostname == groups['lxd'][0]
+
+- name: Running 'lxc init' on slaves
+  become: yes
+  command: cat lxd-slave.yaml | lxc init --preseed
+  when: inventory_hostname != groups['lxd'][0]
+
+- name: Run "lxc cluster list" and register the results
+  become: yes
+  shell: lxc cluster list
+  register: cluster_list
+
+- name: Output the registered results of "lxc cluster list"
+  debug: var=cluster_list.stdout_lines
